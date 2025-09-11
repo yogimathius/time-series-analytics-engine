@@ -7,7 +7,6 @@ import (
 	"log"
 	"sync"
 	"time"
-	"time-series-analytics-engine/storage"
 )
 
 // MetricData represents incoming metric data
@@ -29,9 +28,14 @@ const (
 	StatsDSource     DataSource = "statsd"
 )
 
+// StorageWriter interface for abstracting storage operations
+type StorageWriter interface {
+	AddPoint(seriesID string, labels map[string]string, timestamp time.Time, value float64) error
+}
+
 // StreamProcessor handles real-time data ingestion and processing
 type StreamProcessor struct {
-	hotStorage       *storage.HotStorage
+	storage          StorageWriter
 	bufferSize       int
 	batchSize        int
 	flushInterval    time.Duration
@@ -117,9 +121,9 @@ func (dv *DataValidator) ValidateMetric(metric MetricData) error {
 }
 
 // NewStreamProcessor creates a new stream processor
-func NewStreamProcessor(hotStorage *storage.HotStorage, bufferSize, batchSize int, flushInterval time.Duration) *StreamProcessor {
+func NewStreamProcessor(storage StorageWriter, bufferSize, batchSize int, flushInterval time.Duration) *StreamProcessor {
 	return &StreamProcessor{
-		hotStorage:    hotStorage,
+		storage:       storage,
 		bufferSize:    bufferSize,
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
@@ -263,7 +267,7 @@ func (sp *StreamProcessor) flushBuffer() {
 // processBatch writes a batch of metrics to storage
 func (sp *StreamProcessor) processBatch(batch []MetricData) {
 	for _, metric := range batch {
-		err := sp.hotStorage.AddPoint(
+		err := sp.storage.AddPoint(
 			metric.Name,
 			metric.Labels,
 			metric.Timestamp,
@@ -365,4 +369,9 @@ func (sp *StreamProcessor) IsRunning() bool {
 	sp.bufferMutex.Lock()
 	defer sp.bufferMutex.Unlock()
 	return sp.isRunning
+}
+
+// GetValidator returns the data validator for configuration
+func (sp *StreamProcessor) GetValidator() *DataValidator {
+	return sp.validator
 }

@@ -12,18 +12,26 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// StorageReader interface for abstracting storage read operations
+type StorageReader interface {
+	GetSeries(seriesID string) (*storage.Series, bool)
+	GetSeriesByLabels(labelFilters map[string]string) []*storage.Series
+	GetRange(seriesID string, start, end time.Time) ([]storage.DataPoint, error)
+	GetStorageStats() storage.StorageStats
+}
+
 // Server represents the HTTP API server
 type Server struct {
 	router          *mux.Router
-	hotStorage      *storage.HotStorage
+	storage         StorageReader
 	streamProcessor *ingestion.StreamProcessor
 }
 
 // NewServer creates a new API server
-func NewServer(hotStorage *storage.HotStorage, streamProcessor *ingestion.StreamProcessor) *Server {
+func NewServer(storage StorageReader, streamProcessor *ingestion.StreamProcessor) *Server {
 	server := &Server{
 		router:          mux.NewRouter(),
-		hotStorage:      hotStorage,
+		storage:         storage,
 		streamProcessor: streamProcessor,
 	}
 	
@@ -96,17 +104,11 @@ type QueryResponse struct {
 
 // SeriesListResponse represents the series list response
 type SeriesListResponse struct {
-	Series []SeriesInfo `json:"series"`
-	Count  int          `json:"count"`
+	Series []storage.SeriesInfo `json:"series"`
+	Count  int                  `json:"count"`
 }
 
-// SeriesInfo represents metadata about a series
-type SeriesInfo struct {
-	ID       string            `json:"id"`
-	Labels   map[string]string `json:"labels"`
-	Size     int               `json:"size"`
-	LastSeen time.Time         `json:"last_seen"`
-}
+// Using SeriesInfo from storage package
 
 // StatsResponse represents system statistics
 type StatsResponse struct {
@@ -232,11 +234,11 @@ func (s *Server) ingestBatch(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listSeries(w http.ResponseWriter, r *http.Request) {
 	// Get all series (this is a simplified implementation)
 	// In a real system, you'd want pagination and filtering
-	allSeries := s.hotStorage.GetSeriesByLabels(map[string]string{})
+	allSeries := s.storage.GetSeriesByLabels(map[string]string{})
 	
-	var seriesList []SeriesInfo
+	var seriesList []storage.SeriesInfo
 	for _, series := range allSeries {
-		seriesList = append(seriesList, SeriesInfo{
+		seriesList = append(seriesList, storage.SeriesInfo{
 			ID:       series.ID,
 			Labels:   series.Labels,
 			Size:     series.Size(),
@@ -301,15 +303,20 @@ func (s *Server) queryData(w http.ResponseWriter, r *http.Request) {
 		endTime = time.Now()
 	}
 	
-	// Get series
-	series, exists := s.hotStorage.GetSeries(seriesID)
-	if !exists {
-		http.Error(w, "Series not found", http.StatusNotFound)
+	// Get data points in range
+	points, err := s.storage.GetRange(seriesID, startTime, endTime)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to query data: %v", err), http.StatusInternalServerError)
 		return
 	}
 	
-	// Get data points in range
-	points := series.GetRange(startTime, endTime)
+	if len(points) == 0 {
+		// Check if series exists at all
+		if _, exists := s.storage.GetSeries(seriesID); !exists {
+			http.Error(w, "Series not found", http.StatusNotFound)
+			return
+		}
+	}
 	
 	// Apply limit if specified
 	if limitParam != "" {
@@ -324,9 +331,17 @@ func (s *Server) queryData(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// Get series metadata for labels
+	var labels map[string]string
+	if series, exists := s.storage.GetSeries(seriesID); exists {
+		labels = series.Labels
+	} else {
+		labels = make(map[string]string)
+	}
+	
 	response := QueryResponse{
 		Series: seriesID,
-		Labels: series.Labels,
+		Labels: labels,
 		Points: points,
 		Count:  len(points),
 	}
@@ -337,14 +352,15 @@ func (s *Server) queryData(w http.ResponseWriter, r *http.Request) {
 // getStats returns system statistics
 func (s *Server) getStats(w http.ResponseWriter, r *http.Request) {
 	ingested, processed, errors, batches := s.streamProcessor.GetStats()
+	storageStats := s.storage.GetStorageStats()
 	
 	response := StatsResponse{
 		Storage: struct {
 			SeriesCount  int   `json:"series_count"`
 			TotalPoints  int64 `json:"total_points"`
 		}{
-			SeriesCount: s.hotStorage.GetSeriesCount(),
-			TotalPoints: s.hotStorage.GetTotalPoints(),
+			SeriesCount: storageStats.Hot.SeriesCount,
+			TotalPoints: storageStats.Hot.TotalPoints,
 		},
 		Ingestion: struct {
 			TotalIngested    int64 `json:"total_ingested"`

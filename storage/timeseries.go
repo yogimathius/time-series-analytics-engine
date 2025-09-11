@@ -291,6 +291,14 @@ func (s *Series) Aggregate(start, end time.Time, aggFunc AggregationFunc) float6
 	return aggFunc(points)
 }
 
+// SeriesInfo represents metadata about a series
+type SeriesInfo struct {
+	ID       string            `json:"id"`
+	Labels   map[string]string `json:"labels"`
+	Size     int               `json:"size"`
+	LastSeen time.Time         `json:"last_seen"`
+}
+
 // Helper function to match label filters
 func matchesLabels(seriesLabels, filters map[string]string) bool {
 	for key, value := range filters {
