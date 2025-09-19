@@ -7,6 +7,7 @@ import (
 	"log"
 	"sync"
 	"time"
+	"time-series-analytics-engine/analytics"
 )
 
 // MetricData represents incoming metric data
@@ -51,11 +52,14 @@ type StreamProcessor struct {
 		TotalProcessed   int64
 		TotalErrors      int64
 		BatchesProcessed int64
+		AnomaliesDetected int64
 		mu               sync.RWMutex
 	}
 	
-	// Data validation
-	validator *DataValidator
+	// Data validation and anomaly detection
+	validator       *DataValidator
+	anomalyEngine   *analytics.AnomalyEngine
+	anomalyEnabled  bool
 }
 
 // DataValidator handles data quality and validation
