@@ -1,0 +1,314 @@
+version: '3.8'
+
+services:
+  # Time Series Analytics Engine Cluster
+  timeseries-node1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      - NODE_ID=node1
+      - CLUSTER_ENABLED=true
+      - JWT_SECRET=${JWT_SECRET}
+      - PROMETHEUS_ENABLED=true
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    volumes:
+      - timeseries-data-node1:/data
+      - ./config.production.json:/config.json:ro
+      - ./logs:/var/log/timeseries
+    networks:
+      - timeseries-cluster
+    depends_on:
+      - redis-cluster
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: '4'
+        reservations:
+          memory: 4G
+          cpus: '2'
+    healthcheck:
+      test: ["CMD", "/time-series-engine", "-health-check"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  timeseries-node2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      - NODE_ID=node2
+      - CLUSTER_ENABLED=true
+      - JWT_SECRET=${JWT_SECRET}
+      - PROMETHEUS_ENABLED=true
+    ports:
+      - "8081:8080"
+      - "9091:9090"
+    volumes:
+      - timeseries-data-node2:/data
+      - ./config.production.json:/config.json:ro
+      - ./logs:/var/log/timeseries
+    networks:
+      - timeseries-cluster
+    depends_on:
+      - redis-cluster
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: '4'
+        reservations:
+          memory: 4G
+          cpus: '2'
+
+  timeseries-node3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      - NODE_ID=node3
+      - CLUSTER_ENABLED=true
+      - JWT_SECRET=${JWT_SECRET}
+      - PROMETHEUS_ENABLED=true
+    ports:
+      - "8082:8080"
+      - "9092:9090"
+    volumes:
+      - timeseries-data-node3:/data
+      - ./config.production.json:/config.json:ro
+      - ./logs:/var/log/timeseries
+    networks:
+      - timeseries-cluster
+    depends_on:
+      - redis-cluster
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: '4'
+        reservations:
+          memory: 4G
+          cpus: '2'
+
+  # Load Balancer
+  haproxy:
+    image: haproxy:2.8-alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8404:8404"  # HAProxy stats
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./ssl:/etc/ssl/certs:ro
+    networks:
+      - timeseries-cluster
+    depends_on:
+      - timeseries-node1
+      - timeseries-node2
+      - timeseries-node3
+
+  # Redis Cluster for caching and coordination
+  redis-cluster:
+    image: redis:7-alpine
+    restart: always
+    command: >
+      redis-server 
+      --appendonly yes 
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --requirepass ${REDIS_PASSWORD}
+      --maxmemory 2g
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-cluster-data:/data
+    networks:
+      - timeseries-cluster
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+
+  # Monitoring Stack
+  prometheus:
+    image: prom/prometheus:latest
+    restart: always
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    ports:
+      - "9093:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - timeseries-cluster
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: always
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel,grafana-clock-panel
+      - GF_FEATURE_TOGGLES_ENABLE=ngalert
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    networks:
+      - timeseries-cluster
+    depends_on:
+      - prometheus
+
+  # Log aggregation
+  loki:
+    image: grafana/loki:latest
+    restart: always
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki-data:/loki
+      - ./monitoring/loki.yml:/etc/loki/local-config.yaml:ro
+    networks:
+      - timeseries-cluster
+
+  promtail:
+    image: grafana/promtail:latest
+    restart: always
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./logs:/var/log/timeseries:ro
+      - ./monitoring/promtail.yml:/etc/promtail/config.yml:ro
+    networks:
+      - timeseries-cluster
+    depends_on:
+      - loki
+
+  # Distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    restart: always
+    environment:
+      - COLLECTOR_ZIPKIN_HTTP_PORT=9411
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "14268:14268"  # HTTP collector
+    volumes:
+      - jaeger-data:/badger
+    networks:
+      - timeseries-cluster
+
+  # Database for metadata
+  postgres:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      - POSTGRES_DB=timeseries_metadata
+      - POSTGRES_USER=timeseries
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - timeseries-cluster
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+
+  # Object storage for cold storage
+  minio:
+    image: minio/minio:latest
+    restart: always
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - timeseries-cluster
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 512M
+
+  # Backup service
+  backup:
+    build:
+      context: ./backup
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      - BACKUP_SCHEDULE=0 2 * * *
+      - S3_ENDPOINT=minio:9000
+      - S3_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - S3_SECRET_KEY=${MINIO_SECRET_KEY}
+      - S3_BUCKET=timeseries-backups
+    volumes:
+      - timeseries-data-node1:/backup/node1:ro
+      - timeseries-data-node2:/backup/node2:ro
+      - timeseries-data-node3:/backup/node3:ro
+    networks:
+      - timeseries-cluster
+    depends_on:
+      - minio
+
+volumes:
+  timeseries-data-node1:
+  timeseries-data-node2:
+  timeseries-data-node3:
+  redis-cluster-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+  jaeger-data:
+  postgres-data:
+  minio-data:
+
+networks:
+  timeseries-cluster:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
